@@ -2,14 +2,28 @@
 setlocal EnableExtensions DisableDelayedExpansion
 
 rem Installs a RhinoJS launcher plus integrations for Sublime Text and VS Code.
-rem Usage: install-rhino-editors.bat "C:\path\to\js.jar" [project-folder]
+rem Usage:
+rem   install-rhino-editors.bat
+rem   install-rhino-editors.bat [project-folder]
+rem   install-rhino-editors.bat "C:\path\to\rhino-all.jar" [project-folder]
 
-if "%~1"=="" goto :usage
+if not "%~3"=="" goto :usage
 
-set "RHINO_JAR=%~f1"
-if not exist "%RHINO_JAR%" (
-  echo ERROR: Rhino JAR not found: "%RHINO_JAR%"
-  exit /b 1
+if "%RHINO_VERSION%"=="" set "RHINO_VERSION=1.9.1"
+set "RHINO_JAR="
+set "PROJECT_DIR=%CD%"
+
+if not "%~1"=="" (
+  if "%~2"=="" (
+    if /I "%~x1"==".jar" (
+      set "RHINO_JAR=%~f1"
+    ) else (
+      set "PROJECT_DIR=%~f1"
+    )
+  ) else (
+    set "RHINO_JAR=%~f1"
+    set "PROJECT_DIR=%~f2"
+  )
 )
 
 where java.exe >nul 2>&1
@@ -18,16 +32,23 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if "%~2"=="" (
-  set "PROJECT_DIR=%CD%"
-) else (
-  set "PROJECT_DIR=%~f2"
+if defined RHINO_JAR (
+  if not exist "%RHINO_JAR%" (
+    echo ERROR: Rhino JAR not found: "%RHINO_JAR%"
+    exit /b 1
+  )
 )
 
 if not exist "%PROJECT_DIR%" (
   echo ERROR: Project folder not found: "%PROJECT_DIR%"
   exit /b 1
 )
+
+if not defined RHINO_JAR (
+  call :download_rhino || exit /b 1
+)
+
+call :test_rhino || exit /b 1
 
 set "RHINO_HOME=%LOCALAPPDATA%\RhinoJS"
 set "RHINO_BIN=%RHINO_HOME%\bin"
@@ -95,6 +116,60 @@ if defined VSCODE_NOTE echo NOTE: %VSCODE_NOTE%
 exit /b 0
 
 :usage
-echo Usage: %~nx0 "C:\path\to\js.jar" [project-folder]
-echo Example: %~nx0 "C:\tools\rhino\js.jar" "C:\projects\my-rhino-project"
+echo Usage: %~nx0 [project-folder]
+echo        %~nx0 "C:\path\to\rhino-all.jar" [project-folder]
+echo Examples:
+echo   %~nx0
+echo   %~nx0 "C:\projects\my-rhino-project"
+echo   %~nx0 "C:\tools\rhino\rhino-all.jar" "C:\projects\my-rhino-project"
 exit /b 2
+
+:download_rhino
+set "RHINO_HOME=%LOCALAPPDATA%\RhinoJS"
+if not exist "%RHINO_HOME%" mkdir "%RHINO_HOME%" || exit /b 1
+set "RHINO_JAR=%RHINO_HOME%\rhino-all-%RHINO_VERSION%.jar"
+if exist "%RHINO_JAR%" exit /b 0
+
+echo Downloading RhinoJS %RHINO_VERSION%...
+set "PS_SCRIPT=%TEMP%\rhinojs-download-%RANDOM%-%RANDOM%.ps1"
+> "%PS_SCRIPT%" echo param([string]$Version, [string]$Jar)
+>>"%PS_SCRIPT%" echo $ErrorActionPreference = 'Stop'
+>>"%PS_SCRIPT%" echo $dir = Split-Path -Parent $Jar
+>>"%PS_SCRIPT%" echo New-Item -ItemType Directory -Force -Path $dir ^| Out-Null
+>>"%PS_SCRIPT%" echo $base = "https://repo.maven.apache.org/maven2/org/mozilla/rhino-all/$Version/rhino-all-$Version.jar"
+>>"%PS_SCRIPT%" echo $tmpJar = "$Jar.tmp"
+>>"%PS_SCRIPT%" echo $tmpSha = "$Jar.sha256.tmp"
+>>"%PS_SCRIPT%" echo Remove-Item -Force -ErrorAction SilentlyContinue $tmpJar, $tmpSha
+>>"%PS_SCRIPT%" echo Invoke-WebRequest -Uri $base -OutFile $tmpJar
+>>"%PS_SCRIPT%" echo Invoke-WebRequest -Uri "$base.sha256" -OutFile $tmpSha
+>>"%PS_SCRIPT%" echo $expected = ((Get-Content -Raw $tmpSha).Trim() -split '\s+')[0].ToLowerInvariant()
+>>"%PS_SCRIPT%" echo $actual = (Get-FileHash -Algorithm SHA256 $tmpJar).Hash.ToLowerInvariant()
+>>"%PS_SCRIPT%" echo if ($actual -ne $expected) { Remove-Item -Force -ErrorAction SilentlyContinue $tmpJar; throw "RhinoJS download failed SHA-256 verification." }
+>>"%PS_SCRIPT%" echo Move-Item -Force $tmpJar $Jar
+>>"%PS_SCRIPT%" echo Remove-Item -Force -ErrorAction SilentlyContinue $tmpSha
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" -Version "%RHINO_VERSION%" -Jar "%RHINO_JAR%"
+set "PS_EXIT=%ERRORLEVEL%"
+del "%PS_SCRIPT%" >nul 2>&1
+if not "%PS_EXIT%"=="0" exit /b %PS_EXIT%
+exit /b 0
+
+:test_rhino
+set "RHINO_TEST=%TEMP%\rhinojs-test-%RANDOM%-%RANDOM%.js"
+set "RHINO_TEST_OUT=%TEMP%\rhinojs-test-%RANDOM%-%RANDOM%.out"
+> "%RHINO_TEST%" echo print("rhino-ok"^);
+java -cp "%RHINO_JAR%" org.mozilla.javascript.tools.shell.Main "%RHINO_TEST%" >"%RHINO_TEST_OUT%" 2>&1
+if errorlevel 1 (
+  type "%RHINO_TEST_OUT%"
+  del "%RHINO_TEST%" "%RHINO_TEST_OUT%" >nul 2>&1
+  echo ERROR: RhinoJS runtime test failed for "%RHINO_JAR%"
+  exit /b 1
+)
+findstr /C:"rhino-ok" "%RHINO_TEST_OUT%" >nul 2>&1
+if errorlevel 1 (
+  type "%RHINO_TEST_OUT%"
+  del "%RHINO_TEST%" "%RHINO_TEST_OUT%" >nul 2>&1
+  echo ERROR: RhinoJS runtime test did not produce the expected output for "%RHINO_JAR%"
+  exit /b 1
+)
+del "%RHINO_TEST%" "%RHINO_TEST_OUT%" >nul 2>&1
+exit /b 0
